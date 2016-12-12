@@ -5,6 +5,8 @@ describe('Undoable', () => {
   let mockUndoableReducer
   let mockInitialState
   let incrementedState
+  let suspendedStates
+  let resumedState
 
   before('setup mock reducers and states', () => {
     let countInitialState = 0
@@ -33,6 +35,21 @@ describe('Undoable', () => {
     mockUndoableReducer = undoable(countReducer, undoConfig)
     mockInitialState = mockUndoableReducer(void 0, {})
     incrementedState = mockUndoableReducer(mockInitialState, { type: 'INCREMENT' })
+    suspendedStates = []
+    resumedState = [
+      ActionCreators.suspend(),
+      { type: 'INCREMENT' },
+      ActionCreators.suspend(),
+      { type: 'INCREMENT' },
+      { type: 'INCREMENT' },
+      ActionCreators.resume(),
+      { type: 'INCREMENT' },
+      ActionCreators.resume()
+    ].reduce((state, action) => {
+      let nextState = mockUndoableReducer(state, action)
+      suspendedStates.push(nextState)
+      return nextState
+    }, mockInitialState)
   })
 
   it('should wrap its old history', () => {
@@ -58,11 +75,14 @@ describe('Undoable', () => {
 
   describe('Undo', () => {
     let undoState
+    let multiUndoState
     before('perform an undo action', () => {
       undoState = mockUndoableReducer(incrementedState, ActionCreators.undo())
+      multiUndoState = mockUndoableReducer(resumedState, ActionCreators.undo())
     })
     it('should change present state back by one action', () => {
       expect(undoState.present).to.equal(mockInitialState.present)
+      expect(multiUndoState.present).to.equal(mockInitialState.present)
     })
     it('should change present state to first element of \'past\'', () => {
       expect(undoState.present).to.equal(incrementedState.past[0])
@@ -86,12 +106,17 @@ describe('Undoable', () => {
   describe('Redo', () => {
     let undoState
     let redoState
+    let multiUndoState
+    let multiRedoState
     before('perform an undo action then a redo action', () => {
       undoState = mockUndoableReducer(incrementedState, ActionCreators.undo())
       redoState = mockUndoableReducer(undoState, ActionCreators.redo())
+      multiUndoState = mockUndoableReducer(resumedState, ActionCreators.undo())
+      multiRedoState = mockUndoableReducer(multiUndoState, ActionCreators.redo())
     })
     it('should change present state to equal state before undo', () => {
       expect(redoState.present).to.equal(incrementedState.present)
+      expect(multiRedoState.present).to.equal(resumedState.present)
     })
     it('should change present state to first element of \'future\'', () => {
       expect(redoState.present).to.equal(undoState.future[0])
@@ -111,6 +136,59 @@ describe('Undoable', () => {
       expect(redoState.future.length).to.equal(0)
       expect(secondRedoState.history).to.deep.equal(redoState)
       expect(secondRedoState.present).to.deep.equal(redoState.present)
+    })
+  })
+  describe('Suspend', () => {
+    let firstSuspendedState
+    let secondSuspendedState
+    before('suspend state tracking', () => {
+      firstSuspendedState = suspendedStates[0]
+      secondSuspendedState = suspendedStates[2]
+    })
+    it('should increment \'suspendCount\' by one', () => {
+      expect(firstSuspendedState.suspendCount).to.equal(1)
+      expect(secondSuspendedState.suspendCount).to.equal(2)
+    })
+    it('should append \'present\' to \'past\' when suspendCount goes from 0 to 1', () => {
+      expect(firstSuspendedState.past.length).to.equal(mockInitialState.past.length + 1)
+      expect(firstSuspendedState.past[firstSuspendedState.past.length - 1]).to.equal(mockInitialState.present)
+      expect(secondSuspendedState.past).to.equal(firstSuspendedState.past)
+    })
+    it('should prevent tracking state changes', () => {
+      expect(resumedState.past.length).to.equal(1)
+      expect(resumedState.past[0]).to.equal(mockInitialState.present)
+      expect(resumedState.present).to.equal(4)
+    })
+  })
+  describe('Resume', () => {
+    let firstResumedState
+    let secondResumedState
+    before('suspend state tracking', () => {
+      firstResumedState = suspendedStates[5]
+      secondResumedState = suspendedStates[7]
+    })
+    it('should decrement \'suspendCount\' by one', () => {
+      expect(firstResumedState.suspendCount).to.equal(1)
+      expect(secondResumedState.suspendCount).to.equal(0)
+    })
+    it('should set \'present\' to the last \'past\' state when passed `true`', () => {
+      let resumedState = mockUndoableReducer(suspendedStates[1], ActionCreators.resume(true))
+      expect(resumedState.present).to.equal(mockInitialState.present)
+    })
+    it('should set \'present\' to the last \'past\' state when no state changes occured', () => {
+      let resumedState = mockUndoableReducer(suspendedStates[0], ActionCreators.resume())
+      expect(resumedState.present).to.equal(mockInitialState.present)
+    })
+    it('should do nothing when there is no corresponding \'suspend\' call', () => {
+      let resumedState = mockUndoableReducer(mockInitialState, ActionCreators.resume())
+      expect(mockInitialState.past.length).to.equal(0)
+      expect(resumedState.history).to.deep.equal(mockInitialState)
+      expect(resumedState.present).to.deep.equal(mockInitialState.present)
+    })
+    it('should resume tracking state changes', () => {
+      let incrementedState = mockUndoableReducer(resumedState, { type: 'INCREMENT' })
+      expect(incrementedState.past.length).to.equal(resumedState.past.length + 1)
+      expect(incrementedState.past[incrementedState.past.length - 1]).to.equal(resumedState.present)
     })
   })
 })
