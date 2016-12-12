@@ -32,7 +32,9 @@ export const ActionTypes = {
   UNDO: '@@redux-undo/UNDO',
   REDO: '@@redux-undo/REDO',
   JUMP_TO_FUTURE: '@@redux-undo/JUMP_TO_FUTURE',
-  JUMP_TO_PAST: '@@redux-undo/JUMP_TO_PAST'
+  JUMP_TO_PAST: '@@redux-undo/JUMP_TO_PAST',
+  SUSPEND: '@@redux-undo/SUSPEND',
+  RESUME: '@@redux-undo/RESUME'
 }
 // /action types
 
@@ -49,6 +51,12 @@ export const ActionCreators = {
   },
   jumpToPast (index) {
     return { type: ActionTypes.JUMP_TO_PAST, index }
+  },
+  suspend () {
+    return { type: ActionTypes.SUSPEND }
+  },
+  resume (revert) {
+    return { type: ActionTypes.RESUME, revert }
   }
 }
 // /action creators
@@ -66,7 +74,7 @@ function length (history) {
 function insert (history, state, limit) {
   debug('insert', {state, history, free: limit - length(history)})
 
-  const { past, present } = history
+  const { past, present, suspendCount } = history
   const historyOverflow = limit && length(history) >= limit
 
   if (present === undefined) {
@@ -74,7 +82,8 @@ function insert (history, state, limit) {
     return {
       past: [],
       present: state,
-      future: []
+      future: [],
+      suspendCount
     }
   }
 
@@ -84,7 +93,8 @@ function insert (history, state, limit) {
       present
     ],
     present: state,
-    future: []
+    future: [],
+    suspendCount
   }
 }
 // /insert
@@ -93,7 +103,7 @@ function insert (history, state, limit) {
 function undo (history) {
   debug('undo', {history})
 
-  const { past, present, future } = history
+  const { past, present, future, suspendCount } = history
 
   if (past.length <= 0) return history
 
@@ -103,7 +113,8 @@ function undo (history) {
     future: [
       present, // old present state is in the future now
       ...future
-    ]
+    ],
+    suspendCount
   }
 }
 // /undo
@@ -112,7 +123,7 @@ function undo (history) {
 function redo (history) {
   debug('redo', {history})
 
-  const { past, present, future } = history
+  const { past, present, future, suspendCount } = history
 
   if (future.length <= 0) return history
 
@@ -122,7 +133,8 @@ function redo (history) {
     past: [
       ...past,
       present // old present state is in the past now
-    ]
+    ],
+    suspendCount
   }
 }
 // /redo
@@ -131,13 +143,14 @@ function redo (history) {
 function jumpToFuture (history, index) {
   if (index === 0) return redo(history)
 
-  const { past, present, future } = history
+  const { past, present, future, suspendCount } = history
 
   return {
     future: future.slice(index + 1),
     present: future[index],
     past: past.concat([present])
-              .concat(future.slice(0, index))
+              .concat(future.slice(0, index)),
+    suspendCount
   }
 }
 // /jumpToFuture
@@ -146,17 +159,59 @@ function jumpToFuture (history, index) {
 function jumpToPast (history, index) {
   if (index === history.past.length - 1) return undo(history)
 
-  const { past, present, future } = history
+  const { past, present, future, suspendCount } = history
 
   return {
     future: past.slice(index + 1)
                 .concat([present])
                 .concat(future),
     present: past[index],
-    past: past.slice(0, index)
+    past: past.slice(0, index),
+    suspendCount
   }
 }
 // /jumpToPast
+
+// suspend: prevent tracking history until resumeUndo
+function suspend (history) {
+  const { past, present, future, suspendCount } = history
+
+  return {
+    future: future,
+    present: present,
+    past: past,
+    suspendCount: suspendCount + 1
+  }
+}
+// /suspend
+
+// resume: resume tracking history and revert if needed
+function resume (history, revert) {
+  // Restore was called without a matching suspend action, don't change the state
+  if (history.suspendCount < 1) return history
+
+  const { past, present, future, suspendCount } = history
+
+  if (revert || present === past[past.length - 1]) {
+    // Restore was called without the state being changed since the suspend
+    // call, or we explicity  want to revert, we need to remove the history
+    // element added for the suspend action
+    return {
+      past: past.slice(0, past.length - 1), // remove last element from past
+      present: past[past.length - 1], // set element as new present
+      future: future, // don't change future - throw away reverted state
+      suspendCount: suspendCount - 1
+    }
+  }
+
+  return {
+    future: future,
+    present: present,
+    past: past,
+    suspendCount: suspendCount - 1
+  }
+}
+// /resume
 
 // wrapState: for backwards compatibility to 0.4
 function wrapState (state) {
@@ -181,7 +236,8 @@ function createHistory (state) {
   return {
     past: [],
     present: state,
-    future: []
+    future: [],
+    suspendCount: 0
   }
 }
 // /createHistory
@@ -209,7 +265,9 @@ export default function undoable (reducer, rawConfig = {}) {
     undoType: rawConfig.undoType || ActionTypes.UNDO,
     redoType: rawConfig.redoType || ActionTypes.REDO,
     jumpToPastType: rawConfig.jumpToPastType || ActionTypes.JUMP_TO_PAST,
-    jumpToFutureType: rawConfig.jumpToFutureType || ActionTypes.JUMP_TO_FUTURE
+    jumpToFutureType: rawConfig.jumpToFutureType || ActionTypes.JUMP_TO_FUTURE,
+    suspendType: rawConfig.suspend || ActionTypes.SUSPEND,
+    resumeType: rawConfig.resume || ActionTypes.RESUME
   }
   config.history = rawConfig.initialHistory || createHistory(config.initialState)
 
@@ -245,6 +303,23 @@ export default function undoable (reducer, rawConfig = {}) {
         debugEnd()
         return res ? updateState(state, res) : state
 
+      case config.suspendType:
+        res = suspend(state)
+        if (!state.suspendCount) {
+          // if tracking is not suspended, we still need to update the history
+          // so we can revert back to this point
+          res = insert(res, res.present, config.limit)
+        }
+        debug('after suspend', res)
+        debugEnd()
+        return res ? updateState(state, res) : state
+
+      case config.resumeType:
+        res = resume(state, action.revert)
+        debug('after resume', res)
+        debugEnd()
+        return res ? updateState(state, res) : state
+
       default:
         res = reducer(state && state.present, action)
 
@@ -266,6 +341,15 @@ export default function undoable (reducer, rawConfig = {}) {
               present: res
             })
           }
+        }
+
+        if (state && state.suspendCount) {
+          debug('tracking is suspended, not storing it')
+          debugEnd()
+          return wrapState({
+            ...state,
+            present: res
+          })
         }
 
         const history = (state && state.present !== undefined) ? state : config.history
